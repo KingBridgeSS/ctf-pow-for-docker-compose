@@ -8,7 +8,7 @@ A proof-of-work wrapper for CTF challenges hosted with docker-compose, inspired 
 
 - For host
 
-Replace your docker-compose.yml's port mapping with `{{port}}` (see ./example)
+Replace your docker-compose.yml's port mapping with `{{port}}` and rename it into docker-compose.tpl  (see ./example)
 
 ```
 Usage: ctf-pow-for-docker-compose [OPTIONS] --compose-dir <COMPOSE_DIR>
