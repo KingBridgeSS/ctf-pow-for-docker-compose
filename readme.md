@@ -1,6 +1,6 @@
 # CTF-PoW-for-docker-compose
 
-A proof-of-work wrapper for CTF challenges hosted with docker-compose, inspired by it's singleton version: [pow-wrapper](https://github.com/mnixry/pow-wrapper).
+A proof-of-work wrapper for CTF challenges hosted with docker-compose, inspired by it's singleton-container version: [pow-wrapper](https://github.com/mnixry/pow-wrapper).
 
 -  For player
 
