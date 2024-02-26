@@ -2,12 +2,15 @@ use crate::pow::POW;
 use anyhow::{anyhow, Result};
 use fs_extra;
 use log::{error, info, warn};
+use std::env;
+use std::fs::create_dir;
 use std::net::SocketAddr;
-use std::pin::Pin;
-use std::{env, fs::create_dir, path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 pub struct Handler {
@@ -18,11 +21,22 @@ pub struct Handler {
     pub service_timeout: u64,
 }
 struct Client {
-    socket: Pin<Box<TcpStream>>,
-    addr: Pin<Box<SocketAddr>>,
+    socket: TcpStream,
+    addr: SocketAddr,
     pass_pow: bool,
     service_name: Option<String>,
     temp_dir: Option<String>,
+}
+#[derive(thiserror::Error, Debug)]
+pub enum HandlerError {
+    #[error("PoW timeout")]
+    PoWTimeout,
+    #[error("Client closes the connection")]
+    ClientClose,
+    #[error("Service timeout")]
+    ServiceTimeout,
+    #[error("Connection error")]
+    ConnectionError,
 }
 impl Handler {
     pub async fn handle(self: Arc<Self>) -> Result<()> {
@@ -32,32 +46,40 @@ impl Handler {
             let (socket, addr) = listener.accept().await?;
             info!("New connection: {}", addr);
             let self_clone = self.clone();
-            let mut client = Client {
-                socket: Box::pin(socket),
-                addr: Box::pin(addr),
+            let client = Arc::new(Mutex::new(Client {
+                socket,
+                addr,
                 pass_pow: false,
                 service_name: None,
                 temp_dir: None,
-            };
+            }));
 
             tokio::spawn(async move {
-                if let Err(e) = self_clone.handle_connect(&mut client).await {
-                    warn!("Connection {}: {}", *client.addr, e);
-                    if let Err(disconnect_error) = self_clone.handle_disconnect(&client).await {
+                if let Err(e) = self_clone.handle_connect(&client).await {
+                    let client_clone = Arc::clone(&client);
+                    let mut client_lock = client_clone.lock().await;
+                    warn!("Connection {}: {}", client_lock.addr, e);
+                    let _=client_lock
+                        .socket
+                        .write_all(e.to_string().as_bytes())
+                        .await;
+                    if let Err(disconnect_error) = self_clone.handle_disconnect(&client_lock).await
+                    {
                         error!(
                             "Failed to disconnect {}: {}",
-                            *client.addr, disconnect_error
+                            client_lock.addr, disconnect_error
                         );
                     }
+                    client_lock.socket.shutdown().await.unwrap();
                 }
             });
         }
     }
-    async fn handle_connect(&self, client: &mut Client) -> Result<()> {
-        let mut buf = vec![0; 1024];
-
+    async fn handle_connect(&self, client: &Arc<Mutex<Client>>) -> Result<()> {
+        let mut client_lock = client.lock().await;
+        let mut buf = vec![0; 64];
         let pow = POW::init(self.pow_difficulty);
-        client
+        client_lock
             .socket
             .write_all(
                 format!(
@@ -75,17 +97,17 @@ impl Handler {
         loop {
             match time::timeout(
                 Duration::from_secs(self.pow_timeout),
-                client.socket.read(&mut buf),
+                client_lock.socket.read(&mut buf),
             )
             .await
             {
                 Ok(Ok(n)) => loop {
                     let input = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                    if !client.pass_pow {
+                    if !client_lock.pass_pow {
                         if pow.verify(input) {
-                            info!("Pow accepted for {}", *client.addr);
-                            client.pass_pow = true;
-                            client
+                            info!("Pow accepted for {}", client_lock.addr);
+                            client_lock.pass_pow = true;
+                            client_lock
                                 .socket
                                 .write_all(
                                     format!(
@@ -95,38 +117,19 @@ impl Handler {
                                     .as_bytes(),
                                 )
                                 .await?;
-                            let port = self.start_service(client).await?;
-                            client
+                            let port = self.start_service(&mut client_lock).await?;
+                            client_lock
                                 .socket
                                 .write_all(format!("Service started on port {}\n", port).as_bytes())
                                 .await?;
-                            let mut buf = vec![0; 1024];
-                            loop {
-                                // let client_clone = Arc::clone(&mut Client);
-                                // let mut client = client_clone.lock().unwrap();
-                                match time::timeout(
-                                    Duration::from_secs(self.service_timeout),
-                                    client.socket.read(&mut buf),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(n)) => {
-                                        if n == 0 {
-                                            return Err(anyhow!("Client closes the connection",));
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        // ???
-                                        return Err(e.into());
-                                    }
-                                    Err(_) => {
-                                        // no input for service_timeout
-                                        return Err(anyhow!("Service timeout"));
-                                    }
-                                }
-                            }
+                            drop(client_lock);
+                            self.handle_pass_pow(client).await?;
+                            return Err(anyhow!("handle_pass_pow error"));
                         } else {
-                            client.socket.write_all("Invalid PoW\n".as_bytes()).await?;
+                            client_lock
+                                .socket
+                                .write_all("Invalid PoW\n".as_bytes())
+                                .await?;
                             break;
                         }
                     }
@@ -137,7 +140,7 @@ impl Handler {
                 }
                 Err(_) => {
                     // PoW timeout
-                    return Err(anyhow!("PoW timeout"));
+                    return Err(HandlerError::PoWTimeout.into());
                 }
             }
         }
@@ -149,6 +152,46 @@ impl Handler {
         }
         self.remove_service(client).await?;
         Ok(())
+    }
+    async fn handle_pass_pow(&self, client: &Arc<Mutex<Client>>) -> Result<()> {
+        let client_clone = Arc::clone(&client);
+        let (sender, mut receiver) = mpsc::channel(1);
+        let service_timeout = self.service_timeout;
+        tokio::spawn(async move {
+            match time::timeout(Duration::from_secs(service_timeout), async {
+                let mut client_lock = client_clone.lock().await;
+                let mut buf = vec![0; 64];
+                loop {
+                    match client_lock.socket.read(&mut buf).await {
+                        Ok(n) => {
+                            if n == 0 {
+                                println!("ClientClose");
+                                break HandlerError::ClientClose;
+                            }
+                        }
+                        Err(_) => {
+                            println!("ConnectionError");
+                            break HandlerError::ConnectionError;
+                        }
+                    }
+                }
+            })
+            .await
+            {
+                Ok(e) => {
+                    let _ = sender.send(e).await;
+                }
+                Err(_) => {
+                    let _ = sender.send(HandlerError::ServiceTimeout).await;
+                }
+            }
+        });
+        match receiver.recv().await {
+            Some(e) => Err(e.into()),
+            None => {
+                return Err(anyhow!("receiver error"));
+            }
+        }
     }
     async fn start_service(&self, client: &mut Client) -> Result<String> {
         // 1. Create a temporary directory
@@ -209,9 +252,9 @@ async fn test_handle() {
     let handler = Arc::new(Handler {
         port: "1337".to_string(),
         compose_dir: "./example/".to_string(),
-        pow_difficulty: 6,
-        pow_timeout: 10,
-        service_timeout: 10,
+        pow_difficulty: 1,
+        pow_timeout: 100,
+        service_timeout: 100,
     });
     handler.handle().await.unwrap();
 }
