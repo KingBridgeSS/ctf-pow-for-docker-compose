@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 pub struct Handler {
@@ -59,10 +59,7 @@ impl Handler {
                     let client_clone = Arc::clone(&client);
                     let mut client_lock = client_clone.lock().await;
                     warn!("Connection {}: {}", client_lock.addr, e);
-                    let _=client_lock
-                        .socket
-                        .write_all(e.to_string().as_bytes())
-                        .await;
+                    let _ = client_lock.socket.write_all(e.to_string().as_bytes()).await;
                     if let Err(disconnect_error) = self_clone.handle_disconnect(&client_lock).await
                     {
                         error!(
@@ -155,9 +152,8 @@ impl Handler {
     }
     async fn handle_pass_pow(&self, client: &Arc<Mutex<Client>>) -> Result<()> {
         let client_clone = Arc::clone(&client);
-        let (sender, mut receiver) = mpsc::channel(1);
         let service_timeout = self.service_timeout;
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match time::timeout(Duration::from_secs(service_timeout), async {
                 let mut client_lock = client_clone.lock().await;
                 let mut buf = vec![0; 64];
@@ -178,19 +174,13 @@ impl Handler {
             })
             .await
             {
-                Ok(e) => {
-                    let _ = sender.send(e).await;
-                }
-                Err(_) => {
-                    let _ = sender.send(HandlerError::ServiceTimeout).await;
-                }
+                Ok(e) => e,
+                Err(_) => HandlerError::ServiceTimeout,
             }
         });
-        match receiver.recv().await {
-            Some(e) => Err(e.into()),
-            None => {
-                return Err(anyhow!("receiver error"));
-            }
+        match handle.await {
+            Ok(e) => Err(e.into()),
+            Err(e) => Err(e.into()),
         }
     }
     async fn start_service(&self, client: &mut Client) -> Result<String> {
