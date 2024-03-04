@@ -1,0 +1,33 @@
+name: Rust Musl Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build Release with Musl
+        run: |
+          cargo build --target x86_64-unknown-linux-musl --release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ctf-pow-for-docker-compose
+          path: target/x86_64-unknown-linux-musl/release/ctf-pow-for-docker-compose
