@@ -68,7 +68,7 @@ impl Handler {
                             client_lock.addr, disconnect_error
                         );
                     }
-                    client_lock.socket.shutdown().await.unwrap();
+                    let _ = client_lock.socket.shutdown().await;
                 }
             });
         }
