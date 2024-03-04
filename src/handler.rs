@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 pub struct Handler {
+    pub support_emmbed_cmd: bool,
     pub port: String,
     pub compose_dir: String,
     pub pow_difficulty: usize,
@@ -143,40 +144,35 @@ impl Handler {
         }
     }
     async fn handle_disconnect(&self, client: &Client) -> Result<()> {
+        self.remove_service(client).await?;
         if let Some(temp_dir) = &client.temp_dir {
             fs_extra::remove_items(&vec![temp_dir])?;
             warn!("removed directory {}", temp_dir);
         }
-        self.remove_service(client).await?;
         Ok(())
     }
     async fn handle_pass_pow(&self, client: &Arc<Mutex<Client>>) -> Result<()> {
         let client_clone = Arc::clone(&client);
         let service_timeout = self.service_timeout;
         let handle = tokio::spawn(async move {
-            match time::timeout(Duration::from_secs(service_timeout), async {
+            time::timeout(Duration::from_secs(service_timeout), async {
                 let mut client_lock = client_clone.lock().await;
                 let mut buf = vec![0; 64];
                 loop {
                     match client_lock.socket.read(&mut buf).await {
                         Ok(n) => {
                             if n == 0 {
-                                println!("ClientClose");
                                 break HandlerError::ClientClose;
                             }
                         }
                         Err(_) => {
-                            println!("ConnectionError");
                             break HandlerError::ConnectionError;
                         }
                     }
                 }
             })
             .await
-            {
-                Ok(e) => e,
-                Err(_) => HandlerError::ServiceTimeout,
-            }
+            .unwrap_or_else(|_| HandlerError::ServiceTimeout)
         });
         match handle.await {
             Ok(e) => Err(e.into()),
@@ -218,21 +214,35 @@ impl Handler {
         compose_file = compose_file.replace("{{port}}", &port);
         std::fs::write(temp_dir_path.join("docker-compose.yml"), compose_file)?;
         // 5. start the service
-        Command::new("docker")
-            .args(&["compose", "-p", &service_name, "up", "-d"])
-            .current_dir(&temp_dir_path)
-            .output()
-            .await?;
+        if self.support_emmbed_cmd {
+            Command::new("docker")
+                .args(&["compose", "-p", &service_name, "up", "-d"])
+                .current_dir(&temp_dir_path)
+                .output()
+                .await?;
+        } else {
+            Command::new("docker-compose")
+                .args(&["-p", &service_name, "up", "-d"])
+                .current_dir(&temp_dir_path)
+                .output()
+                .await?;
+        }
         // dbg!(output);
         Ok(port)
     }
     async fn remove_service(&self, client: &Client) -> Result<()> {
         if let Some(service_name) = &client.service_name {
-            Command::new("docker")
-                .args(&["compose", "-p", &service_name, "down"])
-                .output()
-                .await?;
-            // dbg!(output);
+            if self.support_emmbed_cmd {
+                Command::new("docker")
+                    .args(&["compose", "-p", &service_name, "down"])
+                    .output()
+                    .await?;
+            } else {
+                Command::new("docker-compose")
+                    .args(&["-p", &service_name, "down"])
+                    .output()
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -240,6 +250,7 @@ impl Handler {
 #[tokio::test]
 async fn test_handle() {
     let handler = Arc::new(Handler {
+        support_emmbed_cmd: false,
         port: "1337".to_string(),
         compose_dir: "./example/".to_string(),
         pow_difficulty: 1,
