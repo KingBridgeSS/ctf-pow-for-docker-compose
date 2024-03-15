@@ -75,7 +75,7 @@ fn docker_compose_emmbed() -> Result<bool, Box<dyn Error>> {
     match emmbed_cmd.stderr(Stdio::piped()).output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("Define and run multi-container applications with Docker.") {
+            if stdout.contains("Define and run multi-container applications with Docker") {
                 Ok(true)
             } else {
                 // Docker < 1.27
