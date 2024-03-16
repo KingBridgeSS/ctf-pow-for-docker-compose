@@ -244,6 +244,11 @@ impl Handler {
                     .await?;
             }
         }
+        // In case anonymous volume not removed
+        Command::new("docker")
+            .args(&["volume", "prune", "-f"])
+            .output()
+            .await?;
         Ok(())
     }
 }

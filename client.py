@@ -25,8 +25,8 @@ def proof_of_work(
     raise ValueError("No solution found")
 
 
-p = remote("localhost", 1337)
-rev= p.recvuntil(b"== ").decode()
+p = remote("10.122.194.33", 1337)
+rev = p.recvuntil(b"== ").decode()
 print(rev)
 matched = re.search(
     r"sha256\('(?P<nonce>[-A-Za-z0-9+/]+?)'.*?\)(?:.*?)startswith\('0'\s*\*\s*(?P<diff>\d+)\)",

@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-pow-for-docker-compose"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64",
